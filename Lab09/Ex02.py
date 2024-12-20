@@ -1,71 +1,99 @@
-from config import *
-import w1thermsensor
+#!/usr/bin/env python3
+
+import time
 import board
 import busio
-import adafruit_bme280.advanced as adafruit_bme280
 import neopixel
-import time
+from config import buttonRed, buttonGreen, ws2812pin
+import RPi.GPIO as GPIO
+import adafruit_bme280.advanced as adafruit_bme280
 
-# WS2812 configuration
-NUM_PIXELS = 8  # Number of LEDs in the strip
-pixels = neopixel.NeoPixel(ws2812pin, NUM_PIXELS, brightness=0.5, auto_write=True)
+# Zakresy parametrów
+temperature_range = [21, 22, 23, 24, 25, 26, 27, 28]
+humidity_range = [20, 30, 40, 50, 60, 70, 80, 88]
 
-# Sensor setup
-def read_ds18b20():
-    sensor = w1thermsensor.W1ThermSensor()
-    return sensor.get_temperature()
+# Kolory stałe dla diod WS2812 (odwrócona kolejność)
+LED_COLORS = [
+    (255, 0, 0),  # Dioda 6-8: czerwony
+    (255, 0, 0),
+    (255, 0, 0),
+    (0, 255, 0),  # Dioda 4-5: zielony
+    (0, 255, 0),
+    (0, 0, 255),  # Dioda 1-3: niebieski
+    (0, 0, 255),
+    (0, 0, 255),
+]
 
-def read_bme280():
+# Inicjalizacja WS2812
+pixels = neopixel.NeoPixel(board.D8, 8, brightness=1.0 / 32, auto_write=False)
+
+# Zmienne globalne
+current_parameter = 0  # 0: temperatura, 1: wilgotność
+last_switch_time = time.time()
+
+# Konfiguracja BME280
+def bme280_config():
     i2c = busio.I2C(board.SCL, board.SDA)
     bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c, 0x76)
-
     bme280.sea_level_pressure = 1013.25
     bme280.standby_period = adafruit_bme280.STANDBY_TC_500
     bme280.iir_filter = adafruit_bme280.IIR_FILTER_X16
-    bme280.overscan_pressure = adafruit_bme280.OVERSCAN_X16
-    bme280.overscan_humidity = adafruit_bme280.OVERSCAN_X1
-    bme280.overscan_temperature = adafruit_bme280.OVERSCAN_X2
+    return bme280
 
-    return bme280.temperature, bme280.humidity, bme280.pressure
+# Odczyt z BME280
+def bme280_read(bme):
+    return {"temperature": bme.temperature, "humidity": bme.humidity}
 
-# Visualize parameters using WS2812 LEDs
-def visualize_parameters(temp, humidity, pressure):
-    temp_color = (int(temp * 2.55), 0, 0)  # Red proportional to temperature
-    humidity_color = (0, int(humidity * 2.55), 0)  # Green proportional to humidity
-    pressure_color = (0, 0, int((pressure - 900) * 255 / 200))  # Blue proportional to pressure range
+# Konfiguracja diod WS2812
+def diode_configuration(pixel, param_value, param_range):
+    pixel.fill((0, 0, 0))  # Wyłączenie wszystkich diod
+    for i in range(len(param_range) - 1):
+        if param_value >= param_range[i] and param_value < param_range[i + 1]:
+            # Zapisz odpowiednią liczbę diod zgodnie z przedziałem
+            for j in range(i + 1):
+                pixel[7 - j] = LED_COLORS[j]  # Odwrócone przypisanie kolorów
+            break
+    pixel.show()
 
-    for i in range(NUM_PIXELS):
-        if i < NUM_PIXELS // 3:
-            pixels[i] = temp_color
-        elif i < 2 * NUM_PIXELS // 3:
-            pixels[i] = humidity_color
-        else:
-            pixels[i] = pressure_color
+# Obsługa przycisku czerwonego
+def button_red_pressed_callback(channel):
+    global current_parameter
+    current_parameter = 0
+    print("Przełączono na wyświetlanie temperatury.")
 
-    pixels.show()
+# Obsługa przycisku zielonego
+def button_green_pressed_callback(channel):
+    global current_parameter
+    current_parameter = 1
+    print("Przełączono na wyświetlanie wilgotności.")
 
-# Main program loop
-def main():
-    print("Starting environment monitoring with WS2812 visualization.")
+# Główna funkcja programu
+if __name__ == "__main__":
     try:
+        # Inicjalizacja BME280
+        bme1 = bme280_config()
+
+        # Konfiguracja przycisków
+        GPIO.add_event_detect(buttonRed, GPIO.FALLING, callback=button_red_pressed_callback, bouncetime=200)
+        GPIO.add_event_detect(buttonGreen, GPIO.FALLING, callback=button_green_pressed_callback, bouncetime=200)
+
+        # Pętla główna
         while True:
-            ds_temp = read_ds18b20()
-            bme_temp, bme_humidity, bme_pressure = read_bme280()
+            parameters = bme280_read(bme1)
+            if current_parameter == 0:  # Wyświetlanie temperatury
+                diode_configuration(pixels, parameters["temperature"], temperature_range)
+            elif current_parameter == 1:  # Wyświetlanie wilgotności
+                diode_configuration(pixels, parameters["humidity"], humidity_range)
 
-            print(f"DS18B20 Temperature: {ds_temp:.2f} °C")
-            print(f"BME280 Temperature: {bme_temp:.2f} °C")
-            print(f"BME280 Humidity: {bme_humidity:.2f} %")
-            print(f"BME280 Pressure: {bme_pressure:.2f} hPa")
+            # Automatyczne przełączanie co 10 sekund
+            if time.time() - last_switch_time > 10:
+                current_parameter = (current_parameter + 1) % 2
+                last_switch_time = time.time()
 
-            visualize_parameters(bme_temp, bme_humidity, bme_pressure)
-            time.sleep(5)  # Refresh every 5 seconds
-
+            time.sleep(0.1)
     except KeyboardInterrupt:
-        print("\nExiting program.")
+        print("Program przerwany. Czyszczenie GPIO...")
     finally:
         pixels.fill((0, 0, 0))
         pixels.show()
         GPIO.cleanup()
-
-if __name__ == "__main__":
-    main()
